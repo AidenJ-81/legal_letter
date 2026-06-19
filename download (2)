@@ -1,0 +1,5 @@
+server.js
+Dockerfile
+.dockerignore
+node_modules
+.env
