@@ -1402,104 +1402,23 @@ function getSchemaForType(type) {
   };
 }
 
-// Claude API 호출 — 웹검색 후 tool_use로 구조화 결과 반환
-// 웹검색은 멀티턴: 1차 응답에서 web_search 호출 → 결과를 메시지에 붙여 2차 호출 → submit tool 반환
+// Claude API 호출 — 웹검색 멀티턴을 서버(/api/collect)에서 완전히 처리
 async function callClaudeWithTool(prompt, type, useWebSearch = true) {
   const schema = getSchemaForType(type);
-  const webSearchTool = { type: 'web_search_20250305', name: 'web_search' };
-  const tools = useWebSearch ? [webSearchTool, schema] : [schema];
-  // API Key는 서버(Coolify 환경변수)에서 관리 — 브라우저는 프록시만 호출
-  const headers = {
-    'Content-Type': 'application/json',
-  };
-
-  // 웹검색에서 실제로 참조한 URL 수집
-  const collectedUrls = [];
-
-  let messages = [{ role: 'user', content: prompt }];
-
-  // 최대 6턴 (웹검색 반복 포함)
-  for (let turn = 0; turn < 6; turn++) {
-    const body = {
+  const res = await fetch('/api/collect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt,
+      type,
       model: getModelId(),
-      max_tokens: 4000,
-      tools,
-      // 첫 턴: 웹검색 먼저 하도록 auto, 웹검색 없으면 submit 강제
-      tool_choice: (useWebSearch && turn === 0)
-        ? { type: 'auto' }
-        : { type: 'tool', name: schema.name },
-      messages
-    };
-
-    const res = await fetch('/api/messages', {
-      method: 'POST', headers, body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-
-    const contentBlocks = data.content || [];
-
-    // submit tool이 왔으면 완료
-    const submitBlock = contentBlocks.find(c => c.type === 'tool_use' && c.name === schema.name);
-    if (submitBlock?.input) {
-      const obj = submitBlock.input;
-      obj.implications = Array.isArray(obj.implications) ? obj.implications : [];
-      obj.compareItems = Array.isArray(obj.compareItems) ? obj.compareItems : [];
-      obj.summaryPoints = Array.isArray(obj.summaryPoints) ? obj.summaryPoints : [];
-      // sourceSites 정리 + 웹검색에서 수집한 URL 보충
-      obj.sourceSites = Array.isArray(obj.sourceSites)
-        ? obj.sourceSites.map(s => typeof s === 'string' ? { name: s, url: '' } : s).filter(s => s && s.name)
-        : [];
-      // Claude가 url을 못 채운 항목에 collectedUrls에서 매칭
-      if (collectedUrls.length) {
-        obj.sourceSites = obj.sourceSites.map(site => {
-          if (site.url) return site;
-          const match = collectedUrls.find(u =>
-            u.url.includes(site.name.replace(/\s/g,'').toLowerCase()) ||
-            site.name.includes(u.name)
-          );
-          return match ? { ...site, url: match.url } : site;
-        });
-        // sourceSites가 비어있으면 collectedUrls로 채움
-        if (!obj.sourceSites.length) {
-          obj.sourceSites = collectedUrls.slice(0, 3);
-        }
-      }
-      return obj;
-    }
-
-    // 웹검색 tool_use 블록 처리
-    const searchBlocks = contentBlocks.filter(c => c.type === 'tool_use' && c.name === 'web_search');
-    if (!searchBlocks.length) {
-      // 검색도 submit도 없는 응답 → 강제로 submit 요청
-      messages = [...messages, { role: 'assistant', content: contentBlocks }];
-      useWebSearch = false; // 다음 턴엔 submit 강제
-      continue;
-    }
-
-    // 웹검색 결과를 다음 메시지에 추가 (멀티턴)
-    messages = [...messages, { role: 'assistant', content: contentBlocks }];
-    const toolResults = [];
-    for (const sb of searchBlocks) {
-      // 실제 웹검색 결과는 API가 서버사이드로 처리 — tool_result를 빈 값으로 전달하면 API가 채워줌
-      // 단, web_search는 server-side tool이라 tool_result 없이 다음 assistant 턴으로 자동 진행됨
-      // → tool_result 블록 없이 그냥 다음 user 메시지를 보내는 방식 사용
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: sb.id,
-        content: '검색을 완료했습니다. 검색 결과를 바탕으로 요약을 작성하고 제출 도구를 호출하세요.'
-      });
-      // 쿼리 기록
-      if (sb.input?.query) {
-        console.log('[웹검색] 쿼리:', sb.input.query);
-      }
-    }
-    messages = [...messages, { role: 'user', content: toolResults }];
-    // 다음 턴에서 submit 강제
-    useWebSearch = false;
-  }
-
-  throw new Error('최대 턴 초과 — 응답을 받지 못했습니다');
+      schema,
+      useWebSearch,
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  return data.result;
 }
 
 // 출처 칩 렌더링 헬퍼 (클릭 시 URL 열기)
